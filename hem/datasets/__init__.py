@@ -28,6 +28,9 @@ def get_dataset(name):
     elif name == 'agent':
         from .agent_dataset import AgentDemonstrations
         return AgentDemonstrations
+    elif name == 'mtlfd agent teacher':
+        from mtlfd_adaptation.mtlfd_dataset import MTLFDAgentTeacherDataset
+        return MTLFDAgentTeacherDataset
     raise NotImplementedError
 
 
