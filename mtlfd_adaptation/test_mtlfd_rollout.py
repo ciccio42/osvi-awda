@@ -27,7 +27,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import yaml  # noqa: E402
-
+import debugpy
 # NOTE: these third-party/pip-installed packages must be imported BEFORE osvi-awda's own repo
 # root goes on sys.path below - osvi-awda has its own top-level `robosuite/` directory (an old
 # vendored fork used by its own scripts) that would otherwise shadow the real, pip-installed
@@ -48,10 +48,13 @@ from hem.models.inverse_module import InverseImitation  # noqa: E402
 from hem.datasets.util import crop as crop_fn  # noqa: E402
 from hem.datasets.util import randomize_video, resize  # noqa: E402
 from mtlfd_adaptation import debug_utils  # noqa: E402
+from mtlfd_adaptation.camera_projection import (  # noqa: E402
+    NO_AUGMENTATION_STATS, build_sample_projection, project_normalized_depth_to_world,
+    project_world_to_final_pixel,
+)
 from mtlfd_adaptation.trajectory_bridge import load_traj  # noqa: E402
 from mtlfd_adaptation.robosuite_camera_utils import (  # noqa: E402
     get_camera_extrinsic_matrix, get_camera_intrinsic_matrix, get_real_depth_map, pixel_to_world,
-    project_world_to_pixel,
 )
 
 GRASP_THRESHOLD = 0.1     # predicted grasp attribute (0..0.2 scale) above this -> "grasp on"
@@ -94,6 +97,21 @@ def move_to(env, target_pos, target_quat=DOWN_QUAT, gripper=-1.0, pos_tol=0.008,
             on_step(obs)
         if np.linalg.norm(target_pos - pos) < pos_tol:
             break
+        if done:
+            raise EpisodeDone()
+    return obs
+
+
+def stabilize(env, n_steps=20):
+    """Hold the current end-effector pose and step the sim so objects placed at env.reset() (which
+    can start mid-air or with residual velocity from randomization) settle onto the table before
+    start_pos and the initial camera frame are read - otherwise the policy's plan is conditioned
+    on a transient, not-yet-physically-settled scene."""
+    pos, quat = current_pose(env)
+    action = np.concatenate([pos, T.quat2axisangle(quat), [-1.0]])
+    obs = None
+    for _ in range(n_steps):
+        obs, reward, done, info = env.step(action)
         if done:
             raise EpisodeDone()
     return obs
@@ -253,11 +271,21 @@ def run_episode(env, model, config, demo_file, height, width, crop, device, debu
                                     tuple(ds_cfg.get('demo_crop', (0, 0, 0, 0))))
 
     obs = env.reset()
+    obs = stabilize(env)
     start_pos, _ = current_pose(env)
     o1 = preprocess_frame(obs['camera_front_image'], crop, height, width)
 
     waypoints = predict_waypoints(model, demo_video, o1, device)
-    abs_positions = waypoints[:, :3] + start_pos[None]
+    if config.get('image_waypoints', False):
+        # waypoints[:, :3] is (normalized image u, v, depth) - the policy's raw output space when
+        # trained with image_waypoints=True (see camera_projection.py / compute_loss_trajectory) -
+        # not a relative-to-start displacement. Project through the same calibrated camera
+        # geometry training used, with no random augmentation (preprocess_frame/make_demo_context
+        # only apply the deterministic crop+resize at eval time).
+        projection = build_sample_projection(crop, NO_AUGMENTATION_STATS, (height, width))
+        abs_positions = project_normalized_depth_to_world(waypoints[:, :3], projection)
+    else:
+        abs_positions = waypoints[:, :3] + start_pos[None]
     grasp_flags = waypoints[:, 3] > GRASP_THRESHOLD
 
     if debug_dir:
@@ -267,11 +295,13 @@ def run_episode(env, model, config, demo_file, height, width, crop, device, debu
         debug_utils.save_frame_grid(demo_video, os.path.join(debug_dir, 'demo_context.png'))
 
         img = debug_utils.unnormalize(o1, normalized=True)
-        K = get_camera_intrinsic_matrix(env.sim, 'camera_front', height, width)
-        Rt = get_camera_extrinsic_matrix(env.sim, 'camera_front')
         prev_px = None
         for pos, grasp_attr in zip(abs_positions, waypoints[:, 3]):
-            proj = project_world_to_pixel(pos, K, Rt)
+            # NOT get_camera_intrinsic_matrix(env.sim, 'camera_front', height, width) - `o1`/`img`
+            # here is the CROPPED+resized display frame, not a native (height,width) camera
+            # capture, and that call ignores the crop entirely (wrong by ~1.3-1.8x focal length,
+            # wrong principal point - see project_world_to_final_pixel's docstring).
+            proj = project_world_to_final_pixel(pos, crop, (height, width))
             if proj is None:
                 continue
             row, col = proj
@@ -344,7 +374,15 @@ def main():
     parser.add_argument('--results_dir', type=str, default=None)
     parser.add_argument('--gpu_id', type=int, default=0)
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--debugpy', action='store_true', help='wait for debugger attach on port 5678') 
     args = parser.parse_args()
+
+    if args.debugpy:
+        print("Waiting for debugger attach on port 5678...")
+        debugpy.listen(('0.0.0.0', 5678))
+        debugpy.wait_for_client()
+        print("Debugger attached.")
+
 
     device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
     model, config = load_model(args.model_dir, args.saved_step, device)

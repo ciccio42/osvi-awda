@@ -40,28 +40,50 @@ def dump_preprocessing_debug_images(trainer, n=4):
     print(f'[mtlfd] wrote preprocessing debug images to {debug_dir}', flush=True)
 
 
-def make_debug_forward(base_forward, save_dir, img_log_freq):
+def make_debug_forward(base_forward, save_dir, img_log_freq, debug_waypoints_step=None):
     """Wraps train_transformer.forward to periodically dump predicted-vs-GT waypoint overlays for
     a validation batch item, on top of the unmodified loss computation (loss/backprop are
-    untouched - this only adds a read-only extra forward pass for visualization)."""
+    untouched - this only adds a read-only extra forward pass for visualization).
+
+    debug_waypoints_step: if set, drops into an ALREADY-ATTACHED debugpy client (requires --debug
+    too, so a client is attached before this runs) right after the extra forward pass, on the
+    step_counter['n'] == debug_waypoints_step validation step. At that point `out['waypoints']`
+    (raw model output, pre-projection), `pred`/`gt` (numpy, same convention
+    debug_utils.save_waypoint_overlay plots), `proj` (this sample's projection_matrix), `context`/
+    `traj` (the real batch) are all live locals - step into compute_loss_trajectory from here to
+    watch the image_waypoints projection + SDTW alignment happen on real data."""
     step_counter = {'n': 0}
 
     def wrapped(config, m, device, context, traj, append=True, val=False):
         loss, stats = base_forward(config, m, device, context, traj, append=append, val=val)
         if val:
             step = step_counter['n']
-            if step % img_log_freq == 0:
+            should_dump_image = step % img_log_freq == 0
+            should_break = debug_waypoints_step is not None and step == debug_waypoints_step
+            if should_dump_image or should_break:
                 try:
                     with torch.no_grad():
                         out = m(traj['states'], traj['images'], context['video'], ret_dist=False,
                                  ents=traj['head_label'])
-                    pred = out['waypoints'][0].detach().cpu().numpy()
+                    # out['waypoints'] is [B,15,4]: 5 SEPARATE sub-plans of length 1,2,3,4,5
+                    # concatenated (see compute_loss_trajectory), not one continuous path - take
+                    # only the last block (the actual deployable 5-waypoint plan), matching
+                    # test_mtlfd_rollout.py::predict_waypoints's own `waypoints[-5:]`.
+                    pred = out['waypoints'][0, -5:].detach().cpu().numpy()
                     gt = traj['traj_points'][0].detach().cpu().numpy()
                     o1 = traj['images'][0, 0].detach().cpu().numpy()
                     proj = traj['projection_matrix'][0].detach().cpu().numpy()
-                    out_path = os.path.join(save_dir, 'debug_images', 'training',
-                                             f'step_{step:07d}', 'waypoints.png')
-                    debug_utils.save_waypoint_overlay(out_path, o1, pred, gt, proj)
+                    if should_dump_image:
+                        out_path = os.path.join(save_dir, 'debug_images', 'training',
+                                                 f'step_{step:07d}', 'waypoints.png')
+                        debug_utils.save_waypoint_overlay(
+                            out_path, o1, pred, gt, proj,
+                            image_waypoints=config.get('image_waypoints', False))
+                    if should_break:
+                        import debugpy
+                        print(f'[mtlfd] hit debug_waypoints_step={step} - breaking into debugger '
+                              f'(out, pred, gt, proj, context, traj are live locals)', flush=True)
+                        debugpy.breakpoint()
                 except Exception as e:  # debug visualization must never break training
                     print(f'[mtlfd] debug overlay failed at step {step}: {e}', flush=True)
             step_counter['n'] += 1
@@ -87,9 +109,15 @@ if __name__ == '__main__':
                          help='listen for a debugpy client and block until one attaches, '
                               'before doing anything else')
     parser.add_argument('--debug-port', type=int, default=5678)
+    parser.add_argument('--debug-waypoints-step', type=int, default=None,
+                         help='break into an attached debugger inside make_debug_forward, right '
+                              'after the extra forward pass that computes out["waypoints"], on '
+                              'this validation step count (0 = first val step hit). Implies '
+                              '--debug (a client must be attached for the breakpoint to do '
+                              'anything) - no need to pass both.')
     args = parser.parse_args()
 
-    if args.debug:
+    if args.debug or args.debug_waypoints_step is not None:
         import debugpy
         debugpy.listen(('0.0.0.0', args.debug_port))
         print(f'[mtlfd] debugpy listening on port {args.debug_port}, waiting for client to '
@@ -113,6 +141,8 @@ if __name__ == '__main__':
             torch.load(trainer.resume, map_location=torch.device('cpu'),
                        weights_only=False).state_dict())
 
-    debug_forward = make_debug_forward(osvi_forward, trainer.save_dir,
-                                        trainer._config.get('img_log_freq', 500))
+    debug_forward = make_debug_forward(osvi_forward, 
+                                       trainer.save_dir,
+                                        trainer._config.get('img_log_freq', 500),
+                                        debug_waypoints_step=args.debug_waypoints_step)
     trainer.train(action_model, debug_forward)

@@ -7,26 +7,35 @@ loop expects (see `scripts/train_transformer.py::forward` and
 
 Only the keys actually consumed by the waypoints=True training path are populated with real data
 (`images`, `traj_points`, `head_label`, `setting_name`, and the demo `video`); a few keys the model
-code reads but never uses on this path (`states`, `actions`, `grasp_point`, `projection_matrix`)
-are filled with cheap placeholders — see docs/02_training_adaptation.md for the full trace of which
-keys are load-bearing.
+code reads but never uses on this path (`states`, `actions`) are filled with cheap placeholders —
+see docs/02_training_adaptation.md for the full trace of which keys are load-bearing.
+
+`traj['projection_matrix']` (from `_make_agent_sample`) is real, calibrated camera geometry, built
+per-sample by `mtlfd_adaptation.camera_projection.build_sample_projection` - load-bearing whenever
+the experiment config sets `image_waypoints: True` (see `scripts/train_transformer.py::
+compute_loss_trajectory`), harmless/unused otherwise. `context['projection_matrix']` (from
+`_make_context`) stays an identity placeholder since it's only read when `policy.vis.context_only`
+is set, which no experiment config here uses.
 """
 import glob
 import itertools
 import os
 import random
 
-import cv2
 import numpy as np
 from torch.utils.data import Dataset
 
 from hem.datasets.util import crop as crop_fn
 from hem.datasets.util import randomize_video, resize
-from mtlfd_adaptation import debug_utils
+from mtlfd_adaptation.camera_projection import build_sample_projection
 from mtlfd_adaptation.trajectory_bridge import load_traj
-from PIL import Image
 
 ALL_PICK_PLACE_TASKS = list(range(16))
+
+# raw trajectory steps to skip before treating a frame as "o1" (the conditioning image) - see
+# _make_agent_sample's comment; 1 is sufficient per empirical check (object bounding boxes stop
+# moving entirely by t=1 across every sampled trajectory).
+AGENT_SETTLE_STEPS = 1
 
 
 class MTLFDAgentTeacherDataset(Dataset):
@@ -93,6 +102,18 @@ class MTLFDAgentTeacherDataset(Dataset):
             d_inds = range(d_start, d_start + len(d_files))
             self.pairs.extend(itertools.product(a_inds, d_inds))
 
+        # camera_projection.CANVAS_SIZE is a hardcoded constant derived from
+        # PickPlaceDistractor.yaml's camera_heights/camera_widths - verify it still matches the
+        # actual stored images once, here, rather than silently building a wrong per-sample
+        # projection_matrix if the dataset is ever regenerated at a different resolution.
+        from mtlfd_adaptation.camera_projection import CANVAS_SIZE
+        sample_traj, _ = load_traj(self.agent_files[0])
+        actual_shape = sample_traj.get(0)['obs']['image'].shape[:2]
+        assert tuple(actual_shape) == CANVAS_SIZE, (
+            f'camera_projection.CANVAS_SIZE={CANVAS_SIZE} does not match actual agent image shape '
+            f'{actual_shape} - the hardcoded camera_front intrinsic/extrinsic in camera_projection.py '
+            f'were derived assuming CANVAS_SIZE; projection_matrix will be wrong until updated.')
+
     def __len__(self):
         return len(self.pairs)
 
@@ -127,15 +148,9 @@ class MTLFDAgentTeacherDataset(Dataset):
             img = resize(img, (self.demo_width, self.demo_height))
             frames.append(img[None])
         frames = np.concatenate(frames, 0)
-        orig_frames = frames.astype(np.uint8).copy()  # pre-augmentation, for debug comparison
         frames, _ = randomize_video(frames, self.color_jitter, None, self.rand_crop, 0,
                                      self.rand_translate, True, rand_flip=self.rand_flip,
                                      force_flip=force_flip)
-        # save original vs augmented frames side by side, paired by index
-        for i, (orig, aug) in enumerate(zip(orig_frames, frames)):
-            cv2.imwrite(f"context_frame_{i}_orig.png", cv2.cvtColor(orig, cv2.COLOR_RGB2BGR))
-            cv2.imwrite(f"context_frame_{i}_aug.png",
-                        debug_utils.unnormalize(np.transpose(aug, (2, 0, 1))))
 
         return {
             'video': np.transpose(frames, (0, 3, 1, 2)).astype(np.float32),
@@ -150,9 +165,15 @@ class MTLFDAgentTeacherDataset(Dataset):
     def _make_agent_sample(self, traj, force_flip=None):
         elements = [x for x in traj]
         n = len(elements)
-        # waypoints=True always anchors the sampled window at the trajectory start (o1 = first
-        # frame), matching AgentDemonstrations._get_pairs (`if self.waypoints: start = 0`).
-        start = 0 if self.waypoints else np.random.randint(0, max(1, n - self.T_pair))
+        # waypoints=True always anchors the sampled window near the trajectory start (o1 = first
+        # usable frame), matching AgentDemonstrations._get_pairs (`if self.waypoints: start = 0`) -
+        # except raw index 0 itself is skipped: objects placed at env.reset() are still settling
+        # onto the table in that very first recorded frame (confirmed empirically - obj_bb centers
+        # shift ~5-10px between t=0 and t=1 across sampled trajectories, then stay pixel-identical
+        # from t=1 onward), so o1=elements[0] would condition the model on a transient scene. This
+        # mirrors test_mtlfd_rollout.py's own stabilize() step, which exists for the same reason on
+        # the live-rollout side.
+        start = AGENT_SETTLE_STEPS if self.waypoints else np.random.randint(0, max(1, n - self.T_pair))
         chosen_t = [min(j + start, n - 1) for j in range(self.T_pair + 1)]
 
         images = []
@@ -161,13 +182,11 @@ class MTLFDAgentTeacherDataset(Dataset):
             img = resize(img, (self.width, self.height))
             images.append(img[None])
         images = np.concatenate(images, 0)
-        images, _ = randomize_video(images, self.color_jitter, None, self.rand_crop, 0,
-                                     self.rand_translate, True, rand_flip=self.rand_flip,
-                                     force_flip=force_flip)
-        # for i, img in enumerate(images):
-        #     pil_img = Image.fromarray(img.astype(np.uint8))
-        #     pil_img.save(f"agent_frame_{i}.png")
-        
+        images, stats = randomize_video(images, self.color_jitter, None, self.rand_crop, 0,
+                                         self.rand_translate, True, rand_flip=self.rand_flip,
+                                         force_flip=force_flip)
+        projection_matrix = build_sample_projection(self.crop, stats, (self.height, self.width))
+
         images = np.transpose(images, (0, 3, 1, 2)).astype(np.float32)
 
         # grasp attribute mining: 'grasp' isn't in ur5e_pick_place's obs, so use the same
@@ -191,7 +210,7 @@ class MTLFDAgentTeacherDataset(Dataset):
             # unused by the waypoints=True forward path (see module docstring) - cheap placeholders
             'states': np.zeros((T, 1), dtype=np.float32),
             'actions': np.zeros((max(T - 1, 0), 7), dtype=np.float32),
-            'projection_matrix': np.eye(4, dtype=np.float32),
+            'projection_matrix': projection_matrix,
             # real, load-bearing fields:
             'traj_points': traj_points,
             'grasp_point': grasp_point,

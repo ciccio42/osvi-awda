@@ -1,0 +1,75 @@
+# "Adapted baseline" comparison run A: all 16 tasks in training, none held out - see
+# pick_place_mtlfd_heldout_0_5_10_15.yaml for the paired held-out-task comparison run. Otherwise
+# identical to pick_place_mtlfd.yaml (same architecture/hyperparameters/dataset preprocessing).
+#
+# test_tasks intentionally reuses [0,5,10,15] (same as the heldout run) purely so Trainer's val
+# DataLoader has data to compute a val loss from (an empty test_tasks: [] makes AgentTeacherDataset
+# build a 0-length val split -> DataLoader's RandomSampler raises "num_samples=0", confirmed by an
+# earlier crashed attempt at this exact file). This does NOT exclude those tasks from training -
+# train_tasks below still lists all 16, unlike the heldout run - so the val loss here is measured
+# on data the model has also trained on (expected/accepted for this "no held-out task" baseline;
+# the train_tasks list is the actual variable being compared between the two runs).
+
+batch_size: 30
+lr: 0.0005
+epochs: 2000
+# batches set explicitly (rather than left absent like the awda baseline) so this wrapper's own
+# target_steps() has a concrete number to check against; it's the exact value 2000 epochs implies
+# for this dataset (64000 pairs / batch_size=30 -> loader_len=2134 -> 2000*2134), computed by
+# constructing the real MTLFDAgentTeacherDataset rather than guessed - matches epochs:2000
+# governing the run (Trainer recomputes epochs=ceil(batches/loader_len) back to 2000 from this).
+batches: 4268000
+loader_workers: 10
+save_freq: 10000
+log_freq: 20
+img_log_freq: 500
+goal_loss: False
+waypoints: true
+save_optim: True
+image_waypoints: True
+mixup: True
+
+dataset:
+  type: "mtlfd agent teacher"
+  root_dir: ${EXPERT_DATA}
+  task_name: pick_place
+  agent_name: ur5e
+  demo_name: human_rgb
+  train_tasks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  test_tasks: [0, 5, 10, 15]
+  T_context: 10
+  agent_context: 0
+  T_pair: 1
+  height: 100
+  width: 180
+  crop: [20, 25, 80, 75]
+  demo_crop: [0, 30, 140, 120]
+  rand_flip: True
+  flip_sync: True
+  rand_crop: [12, 16]
+  rand_translate: [12, 16]
+  color_jitter: [0.1, 0.1, 0.1]
+  sample_sides: True
+  extra_samp_bound: 0.4
+  waypoints: True
+  grasp: True
+
+policy:
+  latent_dim: 60
+  lstm_config:
+    out_dim: 40
+    n_layers: 1
+    is_rnn: False
+  vis:
+    st_goal_attn: True
+    n_st_attn: 2
+    use_pe: True
+    attn_heads: 4
+    normalize: False
+  n_mixtures: 2
+  const_var: True
+  concat_state: False
+  pred_point: True
+  waypoints: 5
+  sub_waypoints: True
+  grasp: True

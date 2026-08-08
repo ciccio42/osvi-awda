@@ -43,5 +43,6 @@ conda activate "$CONDA_ENV"
 srun python -u mtlfd_adaptation/test_mtlfd_rollout.py "$MODEL_DIR" \
     --saved_step "$SAVED_STEP" \
     --episodes "$EPISODES" \
-    --task_ids 12 13 14 15 \
-    --gpu_id 0
+    --task_ids 0 5 10 15 \
+    --gpu_id 0 \
+    --debug

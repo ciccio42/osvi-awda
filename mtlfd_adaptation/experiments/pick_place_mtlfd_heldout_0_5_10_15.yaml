@@ -1,0 +1,72 @@
+# "Adapted baseline" comparison run B: tasks 0, 5, 10, 15 held out of training (paired with
+# pick_place_mtlfd_all_tasks.yaml's all-tasks run) - see Baseline_Agent.md follow-up request.
+#
+# Renamed duplicate of the existing pick_place_mtlfd.yaml for symmetric, self-documenting naming
+# alongside pick_place_mtlfd_all_tasks.yaml. Also fixes a real overlap bug found in that original
+# file: its train_tasks list included 15 (`[..., 14, 15]`) even though 15 is also in test_tasks -
+# meaning the "held out" task 15 was actually leaking into training. Fixed here: train_tasks is
+# exactly "all 16 minus test_tasks" (12 tasks), test_tasks unchanged at [0, 5, 10, 15].
+
+batch_size: 30
+lr: 0.0005
+epochs: 2000
+# batches set explicitly (rather than left absent like the awda baseline) so this wrapper's own
+# target_steps() has a concrete number to check against; it's the exact value 2000 epochs implies
+# for this dataset (48000 pairs / batch_size=30 -> loader_len=1600 -> 2000*1600), computed by
+# constructing the real MTLFDAgentTeacherDataset rather than guessed - matches epochs:2000
+# governing the run (Trainer recomputes epochs=ceil(batches/loader_len) back to 2000 from this).
+batches: 3200000
+loader_workers: 10
+save_freq: 10000
+log_freq: 20
+img_log_freq: 500
+goal_loss: False
+waypoints: true
+save_optim: True
+image_waypoints: False
+mixup: True
+
+dataset:
+  type: "mtlfd agent teacher"
+  root_dir: ${EXPERT_DATA}
+  task_name: pick_place
+  agent_name: ur5e
+  demo_name: human_rgb
+  train_tasks: [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14]
+  test_tasks: [0, 5, 10, 15]
+  T_context: 10
+  agent_context: 0
+  T_pair: 1
+  height: 100
+  width: 180
+  crop: [20, 25, 80, 75]
+  demo_crop: [0, 30, 140, 120]
+  rand_flip: True
+  flip_sync: True
+  rand_crop: [12, 16]
+  rand_translate: [12, 16]
+  color_jitter: [0.1, 0.1, 0.1]
+  sample_sides: True
+  extra_samp_bound: 0.4
+  waypoints: True
+  grasp: True
+
+policy:
+  latent_dim: 60
+  lstm_config:
+    out_dim: 40
+    n_layers: 1
+    is_rnn: False
+  vis:
+    st_goal_attn: True
+    n_st_attn: 2
+    use_pe: True
+    attn_heads: 4
+    normalize: False
+  n_mixtures: 2
+  const_var: True
+  concat_state: False
+  pred_point: True
+  waypoints: 5
+  sub_waypoints: True
+  grasp: True

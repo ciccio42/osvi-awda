@@ -146,7 +146,8 @@ def forward(config,m, device, context, traj, append=True,val=False):
             gamma = basegam*(10**log_dist)
         else:
             gamma = basegam
-        loss,stats = compute_loss_trajectory(out['waypoints'],
+        loss,stats = compute_loss_trajectory(
+                out['waypoints'],
                 traj_points,
                 projection,
                 config.get('num_interp_points',60),

@@ -1,0 +1,63 @@
+# Same as pick_place_mtlfd_smoke.yaml, with rand_flip: False - ablation to check whether removing
+# the flip augmentation changes early-training precision/convergence. Note: the flip-augmented
+# image_waypoints projection was verified numerically correct (round-trips a known world point to
+# ~1e-14) before running this, so this is a plain augmentation-diversity ablation, not a bug fix.
+
+batch_size: 30
+lr: 0.0005
+epochs: 2000
+batches: 4268000
+loader_workers: 10
+save_freq: 10000
+log_freq: 20
+img_log_freq: 40
+goal_loss: False
+waypoints: true
+save_optim: True
+image_waypoints: True
+mixup: True
+
+dataset:
+  type: "mtlfd agent teacher"
+  root_dir: ${EXPERT_DATA}
+  task_name: pick_place
+  agent_name: ur5e
+  demo_name: human_rgb
+  train_tasks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  test_tasks: [0, 5, 10, 15]
+  T_context: 10
+  agent_context: 0
+  T_pair: 1
+  height: 100
+  width: 180
+  crop: [20, 25, 80, 75]
+  demo_crop: [0, 30, 140, 120]
+  rand_flip: False
+  flip_sync: True
+  rand_crop: [12, 16]
+  rand_translate: [12, 16]
+  color_jitter: [0.1, 0.1, 0.1]
+  sample_sides: True
+  extra_samp_bound: 0.4
+  waypoints: True
+  grasp: True
+
+policy:
+  latent_dim: 60
+  lstm_config:
+    out_dim: 40
+    n_layers: 1
+    is_rnn: False
+  vis:
+    st_goal_attn: True
+    n_st_attn: 2
+    use_pe: True
+    attn_heads: 4
+    normalize: False
+  n_mixtures: 2
+  const_var: True
+  concat_state: False
+  pred_point: True
+  waypoints: 5
+  sub_waypoints: True
+  grasp: True

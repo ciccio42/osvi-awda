@@ -213,12 +213,18 @@ def test_transformer(logdir,config,num,writer=None,write_images=False,write_atte
         finished = None
         while finished is None or not finished.all():
             if config.get('waypoints',False):
-                actions = []
+                # NOTE: was `actions = []` here, shadowing the episode-level accumulator list of
+                # the same name (init'd above the while-loop, appended to below via
+                # `actions += [action]`) - every iteration silently wiped that accumulator, so by
+                # the end of the episode it held only the last timestep's per-env raw actions plus
+                # one stacked (T-1,4,4)->(4,4) entry, causing np.array(actions) below to fail with
+                # a broadcast error. Renamed to a local-only variable to fix the collision.
+                step_actions = []
                 for st,im,policy in zip(state['state'],state['img'],policies): #type: ignore
                     assert st.shape[0] == 1 and im.shape[0] == 1
                     action = policy.act({'state':st[0],'img':im[0,:,:,-1]})[0]
-                    actions.append(action)
-                action = np.stack(actions)
+                    step_actions.append(action)
+                action = np.stack(step_actions)
                 # if config.args.start_only:
                 # curway = np.take_along_axis(inter_waypoints,current_waypoints[:,None,None],axis=1).squeeze(1) #type: ignore
                 # action = waypoints_to_actions(state['state'],curway) #type: ignore
@@ -311,18 +317,52 @@ def test_transformer(logdir,config,num,writer=None,write_images=False,write_atte
                 fname = f'{di}/{counts[mot]}-{successes[i]}.mp4'
                 imageio.mimwrite(fname,to_render,fps=fps) #type: ignore
                 print(f'writing {fname}')
-                context_flat = rearrange(contexts[i],'t c w h -> (t w) h c')
-                context_flat = (context_flat-context_flat.min())/(context_flat.max()-context_flat.min())*255
-                imageio.imwrite(f'{di}/{counts[mot]}_context.jpg',context_flat.cpu().numpy().astype(np.uint8))
+                # 2x5 grid instead of a single 1xT strip (T_context=10 -> 2 rows of 5 frames).
+                T_ctx = contexts[i].shape[0]
+                if T_ctx % 5 == 0:
+                    context_grid = rearrange(contexts[i], '(r c) ch w h -> (r w) (c h) ch', r=T_ctx // 5)
+                else:
+                    context_grid = rearrange(contexts[i], 't c w h -> (t w) h c')  # fallback if T_context != 10
+                context_grid = (context_grid-context_grid.min())/(context_grid.max()-context_grid.min())*255
+                imageio.imwrite(f'{di}/{counts[mot]}_context.jpg',context_grid.cpu().numpy().astype(np.uint8))
+
+                # Full trajectory (whole episode, this env only) as a self-contained pkl, mirroring
+                # the on-disk dataset's own per-timestep (obs, action) schema so it's directly
+                # comparable to dataset/panda/traj*.pkl.
+                T_i = term_indices[i] + 1
+                traj_dict = {
+                    'task_id': mot,
+                    'episode_index': counts[mot],
+                    'success': bool(successes[i]),
+                    'total_reward': float(np.asarray(rew_tot)[i]),
+                    'traj': [
+                        {
+                            'obs': {k: np.asarray(v)[i] for k, v in states[t].items()},
+                            'action': (action[t, i] if t < len(action) else None),
+                            'reward': float(rewards[t, i]) if t < len(rewards) else None,
+                            'info': infos[t][i] if t < len(infos) else None,
+                        }
+                        for t in range(T_i)
+                    ],
+                }
+                if config.get('waypoints', False):
+                    traj_dict['predicted_waypoints'] = inter_waypoints[i]
+                pkl_fname = f'{di}/{counts[mot]}_traj.pkl'
+                with open(pkl_fname, 'wb') as pf:
+                    pickle.dump(traj_dict, pf)
+                print(f'writing {pkl_fname}')
         task_reses.append(np.stack((successes,rew_tot),axis=1))
     res = rearrange(np.concatenate(task_reses),'(n b) d -> n b d',b=instances)
     num = int(num)
     if eval_only:
         print("SR out", res[:,:,0].mean())
         print("RW out", res[:,:,1].mean())
-    for mot,results in zip(motions,res): 
-        writer.add_scalar(f"eval/{mot}/success_rate_out_dist", results[:,0].mean(), num)
-        writer.add_scalar(f"eval/{mot}/mean_reward_out_dist", results[:,1].mean(), num)
+    for mot,results in zip(motions,res):
+        # writer is None in single-checkpoint mode (evaluate.py only builds a SummaryWriter when
+        # --bn is omitted) - guard like the other writer.add_scalar calls below already do.
+        if writer is not None:
+            writer.add_scalar(f"eval/{mot}/success_rate_out_dist", results[:,0].mean(), num)
+            writer.add_scalar(f"eval/{mot}/mean_reward_out_dist", results[:,1].mean(), num)
         dblog.log(f"eval/{mot}/mean_reward_out_dist", results[:,1].mean(), num)
         dblog.log(f"eval/{mot}/success_rate_out_dist", results[:,0].mean(), num)
     if eval_only:

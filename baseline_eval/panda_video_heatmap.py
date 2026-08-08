@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from PIL import Image, ImageDraw, ImageFont
+import debugpy  # noqa: F401 - for `python -m baseline_eval.panda_video_heatmap --debug` to work
 
 import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -62,16 +63,31 @@ def natural_key(path):
     return int(m.group(1)) if m else -1
 
 
-def annotate_frame(image_rgb, label, action, eef_pos):
+def _measure_text(draw, text, font):
+    """Text-size measurement compatible across Pillow versions actually in use across this repo's
+    envs: Pillow<10's default bitmap font supports font.getsize() but draw.textbbox() raises
+    ValueError("Only supported for TrueType fonts") on it (seen on Pillow 9.0.1, env `awda`);
+    Pillow>=10 removed font.getsize() entirely, so textbbox() is required there (Pillow 10.2.0, env
+    `osvi_mtlfd`). Try both, then fall back to textlength()+a fixed height estimate."""
+    try:
+        left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+        return right - left, bottom - top
+    except (ValueError, AttributeError):
+        pass
+    try:
+        return font.getsize(text)
+    except AttributeError:
+        pass
+    return int(draw.textlength(text, font=font)), 11
+
+
+def annotate_frame(image_rgb, label, action, eef_pos, eef_point=None):
     img = Image.fromarray(image_rgb)
     draw = ImageDraw.Draw(img)
     font = ImageFont.load_default()
     w, h = img.size
 
-    # font.getsize() (not draw.textbbox(), which needs a TrueType font in newer Pillow, or
-    # draw.textsize()/font.getbbox(), unavailable in this env's Pillow 9.0.1) works for the
-    # default bitmap font here.
-    text_w, text_h = font.getsize(label)
+    text_w, text_h = _measure_text(draw, label, font)
     pos = ((w - text_w) // 2, h - text_h - 5)
     draw.rectangle([pos, (pos[0] + text_w, pos[1] + text_h)], fill=(0, 0, 0))
     draw.text(pos, label, fill=(255, 255, 255), font=font)
@@ -81,6 +97,18 @@ def annotate_frame(image_rgb, label, action, eef_pos):
     draw.text((5, 5), f"action: {action_str}", fill="yellow")
     draw.text((5, 18), f"eef_pos: {np.array2string(np.asarray(eef_pos).round(3), precision=3)}", fill="yellow")
     draw.text((5, 31), f"gripper_cmd: {gripper_str}", fill="yellow")
+
+    if eef_point is not None:
+        # obs['eef_point'] is [row, col] (image-index order, from
+        # hem/robosuite/custom_ik_wrapper.py::project_point) - PIL/cv2 drawing wants (x, y) =
+        # (col, row), so this is a deliberate swap, not a typo. Verified against a rendered frame:
+        # drawing at (col, row) lands exactly on the gripper jaws; the un-swapped order misses.
+        row, col = int(eef_point[0]), int(eef_point[1])
+        r = 4
+        if 0 <= row < h and 0 <= col < w:
+            draw.ellipse([col - r, row - r, col + r, row + r], outline=(255, 0, 0), width=2)
+        draw.text((5, 44), f"eef_point (row,col): {np.array2string(np.asarray(eef_point), precision=0)}",
+                   fill="yellow")
     return np.array(img)
 
 
@@ -100,8 +128,9 @@ def process_episode(args):
         obs = step["obs"]
         image = obs["image"]  # lazily JPEG-decoded on first access, 240x320x3 uint8 RGB
         eef_pos = obs["eef_pos"]
+        eef_point = obs.get("eef_point")
         eef_traj.append(np.asarray(eef_pos[:3], dtype=np.float32))
-        frames.append(annotate_frame(image, label, step["action"], eef_pos))
+        frames.append(annotate_frame(image, label, step["action"], eef_pos, eef_point))
 
     video_dir = os.path.join(out_dir, "videos", label)
     os.makedirs(video_dir, exist_ok=True)
@@ -177,9 +206,15 @@ def main():
     parser.add_argument("--dataset_dir", default=os.path.join(REPO_ROOT, "dataset", "panda"))
     parser.add_argument("--out_dir", default=os.path.join(REPO_ROOT, "baseline_eval", "outputs", "panda"))
     parser.add_argument("--per_task_group", type=int, default=100)
-    parser.add_argument("--num_workers", type=int, default=32)
+    parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--limit", type=int, default=None, help="process only the first N files (for a pilot run)")
+    parser.add_argument("--debug", action="store_true", help="enable debug logging")
     args = parser.parse_args()
+
+    if args.debug:
+        debugpy.listen(('0.0.0.0', 5678))
+        print("Waiting for debugger to attach...")
+        debugpy.wait_for_client()
 
     files = sorted(glob.glob(os.path.join(args.dataset_dir, "traj*.pkl")), key=natural_key)
     if args.limit:
@@ -190,6 +225,7 @@ def main():
     work = [(f, args.out_dir, args.per_task_group) for f in files]
     with multiprocessing.Pool(args.num_workers) as pool:
         results = pool.map(process_episode, work)
+        
 
     by_label = {}
     for label, n, eef_traj in results:

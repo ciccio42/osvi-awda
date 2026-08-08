@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from hem.datasets.util import MEAN, STD
+from mtlfd_adaptation.camera_projection import project_world_to_pixel
 
 
 def unnormalize(img_chw, normalized=True):
@@ -42,32 +43,57 @@ def save_batch_debug_images(out_dir, context, traj, index=0, tag='sample'):
     save_frame_grid(traj['images'][index], os.path.join(out_dir, f'{tag}_agent_frames.png'))
 
 
-def project_points(points_xyz, projection_matrix, img_w, img_h):
-    """Rough 2D projection of Nx3 world points for visualization only (uses the repo's bundled
-    generic camera calibration when a real one isn't available - see docs/04)."""
-    n = points_xyz.shape[0]
-    hom = np.concatenate([points_xyz, np.ones((n, 1), dtype=np.float32)], axis=-1)
-    proj = hom @ projection_matrix.T
-    proj = proj[:, :3] / np.clip(proj[:, 2:3], 1e-6, None)
-    px = ((proj[:, 0] * 0.5 + 0.5) * img_w).astype(int)
-    py = ((proj[:, 1] * 0.5 + 0.5) * img_h).astype(int)
-    return np.stack([px, py], axis=-1)
+def _draw_path(img, rows, cols, color):
+    prev = None
+    h, w = img.shape[:2]
+    for row, col in zip(rows, cols):
+        if not (np.isfinite(row) and np.isfinite(col)):
+            prev = None   # break the connecting line across a behind-camera point
+            continue
+        pt = (int(col), int(row))
+        if 0 <= pt[0] < w and 0 <= pt[1] < h:
+            cv2.circle(img, pt, 3, color, -1)
+        if prev is not None:
+            cv2.line(img, prev, pt, color, 1)
+        prev = pt
 
 
 def save_waypoint_overlay(out_path, o1_img_chw, pred_waypoints, gt_waypoints, projection_matrix,
-                           normalized=True):
-    """pred_waypoints / gt_waypoints: [W, 4] (xyz + grasp attribute in [0, 0.2]).
-    Draws predicted waypoints in red, ground truth in green, on the o1 frame."""
+                           normalized=True, image_waypoints=True):
+    """pred_waypoints / gt_waypoints: [W, 4] (position dims + grasp attribute in [0, 0.2]).
+    Draws predicted waypoints in red, ground truth in green, on the o1 frame.
+
+    gt_waypoints[:, :3] is always absolute WORLD xyz - ground-truth traj_points never go through
+    the image_waypoints transform (only predictions do - see compute_loss_trajectory), so it's
+    always projected world->pixel via projection_matrix.
+
+    pred_waypoints[:, :3] depends on image_waypoints:
+      True  -> normalized (u, v, depth) in the SAME normalized-image convention projection_matrix
+               was built in - already in image space, so plotted directly via the (u,v)->pixel
+               formula, no matrix multiply needed (using projection_matrix here would be wrong:
+               that's what the earlier, buggy version of this function did, and what
+               project_normalized_depth_to_world exists to correctly undo).
+      False -> a displacement relative to the trajectory's start position. There's no separate
+               "start_pos" available here, so it's approximated as gt_waypoints[0, :3] (matches
+               mtlfd_dataset.py's own convention that traj_points[0] IS the start position), then
+               projected world->pixel like GT.
+    """
     img = unnormalize(o1_img_chw, normalized)
     h, w = img.shape[:2]
-    for pts, color in ((gt_waypoints, (0, 255, 0)), (pred_waypoints, (0, 0, 255))):
-        xy = project_points(pts[:, :3], projection_matrix, w, h)
-        for i, (x, y) in enumerate(xy):
-            if 0 <= x < w and 0 <= y < h:
-                cv2.circle(img, (int(x), int(y)), 3, color, -1)
-            if i > 0:
-                x0, y0 = xy[i - 1]
-                cv2.line(img, (int(x0), int(y0)), (int(x), int(y)), color, 1)
+
+    gt_row, gt_col = project_world_to_pixel(gt_waypoints[:, :3], projection_matrix, (h, w))
+
+    if image_waypoints:
+        pred_row = h * (1 - pred_waypoints[:, 1]) / 2
+        pred_col = (pred_waypoints[:, 0] + 1) * w / 2
+    else:
+        start_pos = gt_waypoints[0, :3]
+        pred_world = pred_waypoints[:, :3] + start_pos[None]
+        pred_row, pred_col = project_world_to_pixel(pred_world, projection_matrix, (h, w))
+
+    _draw_path(img, gt_row, gt_col, (0, 255, 0))
+    _draw_path(img, pred_row, pred_col, (0, 0, 255))
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     cv2.imwrite(out_path, img)
 
