@@ -20,10 +20,50 @@ import torch.utils.data
 from pyutil import sorted_file_match
 
 def dict_to_device(dic,device):
-    for k,v in dic.items(): 
+    for k,v in dic.items():
         if isinstance(v,torch.Tensor):
             dic[k] = v.to(device)
     return dic
+
+
+class PerTaskBatchSampler(torch.utils.data.Sampler):
+    """Batch sampler that yields, every single batch, exactly `samples_per_task` indices from EACH
+    task in `dataset.task_ids` (a parallel per-index task-id array - see
+    mtlfd_adaptation.mtlfd_dataset.MTLFDAgentTeacherDataset). Unlike plain shuffle=True (which only
+    balances tasks in EXPECTATION over the full dataset, not per individual batch), this guarantees
+    exact per-batch composition - config: top-level `samples_per_task: X` (see Trainer.__init__).
+
+    Effective batch_size becomes `X * n_tasks` (config's own `batch_size` is ignored in this mode).
+    Each task's own index pool is reshuffled and re-cycled (with repetition across the epoch) once
+    exhausted, so batches stay full-sized even if per-task pool sizes differ; epoch length is set by
+    the LARGEST task's pool, ceil'd to a whole number of batches.
+    """
+    def __init__(self, dataset, samples_per_task):
+        task_ids = np.asarray(dataset.task_ids)
+        self.samples_per_task = samples_per_task
+        self.tasks = sorted(set(task_ids.tolist()))
+        self.indices_by_task = {t: np.where(task_ids == t)[0] for t in self.tasks}
+        max_pool = max(len(idxs) for idxs in self.indices_by_task.values())
+        self.n_batches = -(-max_pool // samples_per_task)   # ceil division
+
+    def __iter__(self):
+        pools = {t: np.random.permutation(idxs) for t, idxs in self.indices_by_task.items()}
+        cursors = {t: 0 for t in self.tasks}
+        for _ in range(self.n_batches):
+            batch = []
+            for t in self.tasks:
+                pool, cur = pools[t], cursors[t]
+                if cur + self.samples_per_task > len(pool):
+                    pool = np.random.permutation(self.indices_by_task[t])
+                    pools[t] = pool
+                    cur = 0
+                batch.extend(pool[cur:cur + self.samples_per_task].tolist())
+                cursors[t] = cur + self.samples_per_task
+            np.random.shuffle(batch)
+            yield batch
+
+    def __len__(self):
+        return self.n_batches
 
 class Profiler(object):
     def __init__(self):
@@ -122,8 +162,25 @@ class Trainer:
             workers = args.workers
         else:
             workers = self._config.get('loader_workers', cpu_count())
-        self._train_loader = DataLoader(dataset, batch_size=self._config['batch_size'], shuffle=True, num_workers= workers, drop_last=drop_last)
-        self._val_loader = DataLoader(val_dataset, batch_size=self._config['batch_size'], shuffle=True, num_workers=workers, drop_last=True)
+        # samples_per_task (optional, top-level config key): force each batch to contain exactly
+        # that many samples from EVERY task (PerTaskBatchSampler above), instead of shuffle=True's
+        # population-level-only balance. Only applies to datasets that expose `.task_ids` (currently
+        # MTLFDAgentTeacherDataset) - falls back to the original shuffle=True path otherwise (e.g.
+        # ConcatDataset from aux_datasets, or any other Dataset class used elsewhere in this shared
+        # trainer), so this is fully backward-compatible when the config key is unset.
+        samples_per_task = self._config.get('samples_per_task')
+        if samples_per_task and hasattr(dataset, 'task_ids'):
+            self._train_loader = DataLoader(
+                dataset, batch_sampler=PerTaskBatchSampler(dataset, samples_per_task),
+                num_workers=workers)
+        else:
+            self._train_loader = DataLoader(dataset, batch_size=self._config['batch_size'], shuffle=True, num_workers= workers, drop_last=drop_last)
+        if samples_per_task and hasattr(val_dataset, 'task_ids'):
+            self._val_loader = DataLoader(
+                val_dataset, batch_sampler=PerTaskBatchSampler(val_dataset, samples_per_task),
+                num_workers=workers)
+        else:
+            self._val_loader = DataLoader(val_dataset, batch_size=self._config['batch_size'], shuffle=True, num_workers=workers, drop_last=True)
 
         # set of file saving
         # save_dir = os.path.join(self._config.get('save_path', './'), '{}_ckpt-{}-{}_{}-{}-{}'.format(save_name, now.hour, now.minute, now.day, now.month, now.year))

@@ -4,6 +4,7 @@
 
 #SBATCH -A did_robot_learning_359
 #SBATCH --partition=gpuq
+#SBATCH --exclude=gnode09,gnode04,gnode03,gnode06,gnode12,gnode10
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=48G

@@ -1,15 +1,15 @@
-# Production variant of pick_place_mtlfd_all_tasks.yaml with rand_flip: False - see
-# pick_place_mtlfd_smoke_noflip.yaml for the short smoke-test version of this same ablation
-# (validated: trains normally, no crashes, comparable early-convergence behavior to the flip
-# version). img_log_freq restored to the production cadence (500, not the smoke test's 40).
+# Ablation of pick_place_mtlfd_all_tasks_noflip.yaml (the config that produced
+# osvi_mtlfd_ckpt-1785849569): BOTH color_jitter disabled AND samples_per_task: 2 (exact per-batch
+# task balance) together - see pick_place_mtlfd_all_tasks_noflip_nojitter.yaml and
+# _balanced.yaml's individual notes for the rationale behind each change in isolation. This combined
+# run exists to get a best-case "does removing both candidate causes fix it" result quickly; it
+# CANNOT by itself attribute an improvement to either change alone - the _nojitter and _balanced
+# variants (run in parallel with this one) are what isolate that.
 #
-# Also includes mtlfd_dataset.py's AGENT_SETTLE_STEPS fix (module-level default, applies to every
-# experiment automatically - not a per-yaml setting): o1/images now start at raw trajectory index
-# AGENT_SETTLE_STEPS instead of 0, skipping the single still-settling frame right after env.reset()
-# (confirmed empirically: obj_bb centers shift ~5-10px between t=0 and t=1, then are pixel-
-# identical from t=1 onward, across every sampled trajectory).
+# NOTE: test_tasks explicitly set to [0, 5, 10, 15] - see the other two variants' identical note.
 
 batch_size: 30
+samples_per_task: 2
 lr: 0.0005
 epochs: 2000
 batches: 4268000
@@ -30,7 +30,7 @@ dataset:
   agent_name: ur5e
   demo_name: human_rgb
   train_tasks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-  test_tasks: []
+  test_tasks: [0, 5, 10, 15]
   T_context: 10
   agent_context: 0
   T_pair: 1
@@ -42,7 +42,7 @@ dataset:
   flip_sync: True
   rand_crop: [12, 16]
   rand_translate: [12, 16]
-  color_jitter: [0.1, 0.1, 0.1]
+  color_jitter: null
   sample_sides: True
   extra_samp_bound: 0.4
   waypoints: True

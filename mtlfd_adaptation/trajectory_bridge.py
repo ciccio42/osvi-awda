@@ -43,6 +43,14 @@ class AliasedTrajectory:
         for t in range(len(self)):
             yield self.get(t)
 
+    def get_raw_state(self, t):
+        """Passthrough to the underlying Trajectory's raw mujoco state snapshot (`sim.get_state()
+        .flatten()` at collection time, when the collector passed one to `Trajectory.append`) -
+        NOT part of `.get(t)`'s obs dict, stored separately. Used by
+        test_mtlfd_rollout.py's set_objects_from_training_trajectory to replicate a training
+        scenario's exact object layout in a live rollout."""
+        return self._traj.get_raw_state(t)
+
 
 def load_traj(fname):
     """Returns (traj, command) with traj.get(t)['obs']['image'] available, and traj.setting_name /

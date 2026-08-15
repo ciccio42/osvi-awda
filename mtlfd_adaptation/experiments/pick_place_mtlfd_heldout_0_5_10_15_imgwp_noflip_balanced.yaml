@@ -1,0 +1,72 @@
+# Ablation of pick_place_mtlfd_heldout_0_5_10_15_imgwp_noflip.yaml (genuine held-out-task split,
+# tasks 0/5/10/15 entirely excluded from train_tasks): samples_per_task: 2 added (exact per-batch
+# task balance via hem/models/trainer.py's PerTaskBatchSampler, instead of shuffle=True's
+# population-level-only balance). This is the config that, on the all_tasks_noflip pseudo-held-out
+# setup, took the color-target pointing/rollout accuracy from ~47-72% to a clean 100% across every
+# split and every color (train/valid/test, greenbox/yellowbox/bluebox/redbox), well before even half
+# the original 430k-step training budget - this run tests whether the same fix generalizes to a
+# TRUE held-out-task split, not just held-out episodes within trained tasks. color_jitter left
+# UNCHANGED (kept at [0.1, 0.1, 0.1], matching the winning "balanced" ablation, not "nojitter").
+#
+# Effective batch size becomes 2*12=24 (12 train_tasks here, vs 16 in all_tasks_noflip) - batch_size
+# below is ignored in this mode, kept only for documentation/parity with the un-ablated yaml.
+
+batch_size: 30
+samples_per_task: 2
+lr: 0.0005
+epochs: 2000
+batches: 3200000
+loader_workers: 10
+save_freq: 10000
+log_freq: 20
+img_log_freq: 500
+goal_loss: False
+waypoints: true
+save_optim: True
+image_waypoints: True
+mixup: True
+
+dataset:
+  type: "mtlfd agent teacher"
+  root_dir: ${EXPERT_DATA}
+  task_name: pick_place
+  agent_name: ur5e
+  demo_name: human_rgb
+  train_tasks: [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14]
+  test_tasks: [0, 5, 10, 15]
+  T_context: 10
+  agent_context: 0
+  T_pair: 1
+  height: 100
+  width: 180
+  crop: [20, 25, 80, 75]
+  demo_crop: [0, 30, 140, 120]
+  rand_flip: False
+  flip_sync: True
+  rand_crop: [12, 16]
+  rand_translate: [12, 16]
+  color_jitter: [0.1, 0.1, 0.1]
+  sample_sides: True
+  extra_samp_bound: 0.4
+  waypoints: True
+  grasp: True
+
+policy:
+  latent_dim: 60
+  lstm_config:
+    out_dim: 40
+    n_layers: 1
+    is_rnn: False
+  vis:
+    st_goal_attn: True
+    n_st_attn: 2
+    use_pe: True
+    attn_heads: 4
+    normalize: False
+  n_mixtures: 2
+  const_var: True
+  concat_state: False
+  pred_point: True
+  waypoints: 5
+  sub_waypoints: True
+  grasp: True

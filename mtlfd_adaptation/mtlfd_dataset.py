@@ -85,6 +85,14 @@ class MTLFDAgentTeacherDataset(Dataset):
 
         self.agent_files, self.demo_files = [], []
         self.pairs = []
+        # task_ids[i] = which task_id self.pairs[i] belongs to - parallel array, used by
+        # hem.models.trainer.PerTaskBatchSampler (config: samples_per_task) to build batches with
+        # an exact, guaranteed-per-batch task count, rather than relying on shuffle=True's
+        # population-level balance (see mtlfd_adaptation session notes: every task already has
+        # identical agent/demo file counts, so plain shuffling is balanced IN EXPECTATION - this
+        # exists for exact per-batch control instead, e.g. to test whether that reduces
+        # gradient-noise-driven asymmetries between tasks/objects).
+        self.task_ids = []
         for subtask in subtasks:
             sub = f'task_{subtask:02d}'
             a_files = sorted(glob.glob(os.path.join(agent_dir, sub, '*.pkl')))
@@ -101,6 +109,7 @@ class MTLFDAgentTeacherDataset(Dataset):
             a_inds = range(a_start, a_start + len(a_files))
             d_inds = range(d_start, d_start + len(d_files))
             self.pairs.extend(itertools.product(a_inds, d_inds))
+            self.task_ids.extend([subtask] * (len(a_files) * len(d_files)))
 
         # camera_projection.CANVAS_SIZE is a hardcoded constant derived from
         # PickPlaceDistractor.yaml's camera_heights/camera_widths - verify it still matches the
@@ -191,7 +200,17 @@ class MTLFDAgentTeacherDataset(Dataset):
 
         # grasp attribute mining: 'grasp' isn't in ur5e_pick_place's obs, so use the same
         # gripper-command threshold osvi-awda's own pick-place branch uses (action[-1] > 0.01).
-        grasp_frames = [False] + [elements[i]['action'][-1] > 0.01 for i in range(1, n)]
+        # elements[i]['action'] is the action that CAUSED the transition INTO elements[i]['obs']
+        # (traj_bridge/the Trajectory saver append the new obs together with the action that
+        # produced it - elements[0] has no action at all, confirming this), not the action about
+        # to be taken from it. So the command "issued while at position i" lives at elements[i+1],
+        # one raw step later. Pairing action[i] with poses[i] (as hem/datasets/agent_dataset.py's
+        # identical sim-data formula does) mislabels the grasp position as the frame AFTER the
+        # gripper has already started closing rather than the frame it was commanded from -
+        # measured as a consistent ~1.7cm downward offset on real ur5e_pick_place trajectories
+        # (sim's baseline doesn't show this since a simulated gripper closes in ~1 physics step,
+        # no visible transient). Shifting the flags back by one raw index fixes this.
+        grasp_frames = [elements[i + 1]['action'][-1] > 0.01 for i in range(n - 1)] + [False]
 
         out_inds = np.linspace(0, n - 1, num=50, endpoint=True, dtype=int)
         poses = np.stack([elements[i]['obs']['ee_aa'][:3] for i in out_inds]).astype(np.float32)

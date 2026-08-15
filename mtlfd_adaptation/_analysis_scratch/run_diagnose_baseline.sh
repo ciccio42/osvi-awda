@@ -17,7 +17,7 @@
 
 set -e
 
-CONDA_ENV=osvi_mtlfd
+CONDA_ENV="${CONDA_ENV:-osvi_mtlfd}"
 REPO_ROOT="/mnt/beegfs/frosa/Multi-Task-LFD-Framework/repo/osvi-awda"
 
 export MUJOCO_PY_MUJOCO_PATH=/home/rsofnc000/.mujoco/mujoco210

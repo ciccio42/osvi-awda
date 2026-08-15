@@ -21,3 +21,5 @@ launch.sh
 *.log
 *out
 *txt
+result.json
+summary.json

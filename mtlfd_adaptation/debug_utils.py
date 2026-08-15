@@ -23,15 +23,22 @@ def unnormalize(img_chw, normalized=True):
     return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
-def save_frame_grid(frames_chw, out_path, normalized=True, cols=None):
-    """frames_chw: [T, C, H, W] -> single row/grid PNG."""
+def build_frame_grid(frames_chw, normalized=True, cols=None):
+    """frames_chw: [T, C, H, W] -> single row/grid HWC uint8 BGR array (no file I/O - see
+    save_frame_grid for the disk-writing wrapper this was factored out of, used e.g. to build a
+    demo-context panel for test_mtlfd_rollout.py's rollout video)."""
     imgs = [unnormalize(f, normalized) for f in frames_chw]
     cols = cols or len(imgs)
     rows = [imgs[i:i + cols] for i in range(0, len(imgs), cols)]
     rows = [np.concatenate(r, axis=1) for r in rows]
     max_w = max(r.shape[1] for r in rows)
     rows = [cv2.copyMakeBorder(r, 0, 0, 0, max_w - r.shape[1], cv2.BORDER_CONSTANT) for r in rows]
-    grid = np.concatenate(rows, axis=0)
+    return np.concatenate(rows, axis=0)
+
+
+def save_frame_grid(frames_chw, out_path, normalized=True, cols=None):
+    """frames_chw: [T, C, H, W] -> single row/grid PNG."""
+    grid = build_frame_grid(frames_chw, normalized, cols)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     cv2.imwrite(out_path, grid)
 
