@@ -1,0 +1,77 @@
+# Real-world finetune of pick_place_mtlfd_heldout_0_5_10_15_imgwp_noflip_balanced (step 290000)
+# on the real_eye_in_hand_ur5e_pick_place dataset, warm-started via --init-weights (NOT --resume -
+# this is a different dataset/config, not a continuation of the sim run). Demo stream is
+# unchanged (still the rendered human_rgb_pick_place videos); only the agent stream switches to
+# the real ZED-front camera trajectories.
+#
+# is_real: True switches MTLFDAgentTeacherDataset to: real-camera BGR->RGB fix (trajectory_bridge),
+# real CANVAS_SIZE + real camera_projection_real.py projection matrix (verified empirically against
+# real eef_pos/camera_front_image pairs - see mtlfd_adaptation/ur5e_zed_front_projection.yaml and
+# camera_projection_real.py), and obs['eef_pos'] (not ee_aa[:3]) for position ground truth.
+#
+# crop == demo_crop == [0, 30, 140, 120] (explicit instruction - no separately-tuned real crop
+# exists yet). image_waypoints stays True: the real projection matrix makes this viable (unlike a
+# naive port, which would have forced image_waypoints=False - the formulation tied to 0% rollout
+# success in the earlier sim work). train_tasks/test_tasks kept identical to the sim run's
+# held-out split for direct comparability.
+
+batch_size: 30
+samples_per_task: 2
+lr: 0.0005
+epochs: 2000
+batches: 3200000
+loader_workers: 10
+save_freq: 10000
+log_freq: 20
+img_log_freq: 500
+goal_loss: False
+waypoints: true
+save_optim: True
+image_waypoints: True
+mixup: True
+
+dataset:
+  type: "mtlfd agent teacher"
+  root_dir: ${EXPERT_DATA}
+  task_name: pick_place
+  agent_name: real_eye_in_hand_ur5e
+  demo_name: human_rgb
+  is_real: True
+  train_tasks: [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14]
+  test_tasks: [0, 5, 10, 15]
+  T_context: 10
+  agent_context: 0
+  T_pair: 1
+  height: 100
+  width: 180
+  crop: [0, 30, 140, 120]
+  demo_crop: [0, 30, 140, 120]
+  rand_flip: False
+  flip_sync: True
+  rand_crop: [12, 16]
+  rand_translate: [12, 16]
+  color_jitter: [0.1, 0.1, 0.1]
+  sample_sides: True
+  extra_samp_bound: 0.4
+  waypoints: True
+  grasp: True
+
+policy:
+  latent_dim: 60
+  lstm_config:
+    out_dim: 40
+    n_layers: 1
+    is_rnn: False
+  vis:
+    st_goal_attn: True
+    n_st_attn: 2
+    use_pe: True
+    attn_heads: 4
+    normalize: False
+  n_mixtures: 2
+  const_var: True
+  concat_state: False
+  pred_point: True
+  waypoints: 5
+  sub_waypoints: True
+  grasp: True

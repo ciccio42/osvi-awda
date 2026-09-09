@@ -99,6 +99,12 @@ if __name__ == '__main__':
     parser.add_argument('--save-parent', type=str, default='')
     parser.add_argument('--device', type=int, default=None, nargs='+')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--init-weights', type=str, default=None,
+                         help='load only the model weights from this checkpoint into a fresh '
+                              'training run (new save dir, fresh step counter, fresh optimizer, '
+                              'the dataset/config from experiment_file) - unlike --resume, which '
+                              'reuses the checkpoint\'s own directory/config/optimizer state and '
+                              'cannot be pointed at a different dataset/config.')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--workers', type=int, default=None)
     parser.add_argument('--reg-log', action='store_true')
@@ -140,6 +146,12 @@ if __name__ == '__main__':
         action_model.load_state_dict(
             torch.load(trainer.resume, map_location=torch.device('cpu'),
                        weights_only=False).state_dict())
+    elif args.init_weights:
+        loaded = torch.load(args.init_weights, map_location=torch.device('cpu'),
+                             weights_only=False)
+        action_model.load_state_dict(
+            loaded.state_dict() if hasattr(loaded, 'state_dict') else loaded)
+        print(f'[mtlfd] initialized weights from {args.init_weights}', flush=True)
 
     debug_forward = make_debug_forward(osvi_forward, 
                                        trainer.save_dir,

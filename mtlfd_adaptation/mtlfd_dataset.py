@@ -28,6 +28,8 @@ from torch.utils.data import Dataset
 from hem.datasets.util import crop as crop_fn
 from hem.datasets.util import randomize_video, resize
 from mtlfd_adaptation.camera_projection import build_sample_projection
+from mtlfd_adaptation.camera_projection_real import build_sample_projection as \
+    build_sample_projection_real
 from mtlfd_adaptation.trajectory_bridge import load_traj
 
 ALL_PICK_PLACE_TASKS = list(range(16))
@@ -47,13 +49,14 @@ class MTLFDAgentTeacherDataset(Dataset):
                  crop=(0, 0, 0, 0), demo_crop=(0, 0, 0, 0),
                  rand_flip=False, flip_sync=True, color_jitter=None, rand_crop=None,
                  rand_translate=None, sample_sides=True, extra_samp_bound=0.4,
-                 waypoints=True, grasp=True, **_ignored):
+                 waypoints=True, grasp=True, is_real=False, **_ignored):
         assert mode in ('train', 'val', 'test'), f'unsupported mode {mode!r}'
         self.root_dir = root_dir
         self.task_name = task_name
         self.agent_name = agent_name
         self.demo_name = demo_name
         self.mode = mode
+        self.is_real = is_real
         self.T_context = T_context
         self.T_pair = T_pair
         self.agent_context = agent_context
@@ -111,17 +114,21 @@ class MTLFDAgentTeacherDataset(Dataset):
             self.pairs.extend(itertools.product(a_inds, d_inds))
             self.task_ids.extend([subtask] * (len(a_files) * len(d_files)))
 
-        # camera_projection.CANVAS_SIZE is a hardcoded constant derived from
-        # PickPlaceDistractor.yaml's camera_heights/camera_widths - verify it still matches the
-        # actual stored images once, here, rather than silently building a wrong per-sample
-        # projection_matrix if the dataset is ever regenerated at a different resolution.
-        from mtlfd_adaptation.camera_projection import CANVAS_SIZE
-        sample_traj, _ = load_traj(self.agent_files[0])
+        # camera_projection[_real].CANVAS_SIZE is a hardcoded constant derived from the relevant
+        # camera's known resolution - verify it still matches the actual stored images once, here,
+        # rather than silently building a wrong per-sample projection_matrix if the dataset is ever
+        # regenerated at a different resolution.
+        if self.is_real:
+            from mtlfd_adaptation.camera_projection_real import CANVAS_SIZE
+        else:
+            from mtlfd_adaptation.camera_projection import CANVAS_SIZE
+        sample_traj, _ = load_traj(self.agent_files[0], is_real=self.is_real)
         actual_shape = sample_traj.get(0)['obs']['image'].shape[:2]
         assert tuple(actual_shape) == CANVAS_SIZE, (
-            f'camera_projection.CANVAS_SIZE={CANVAS_SIZE} does not match actual agent image shape '
-            f'{actual_shape} - the hardcoded camera_front intrinsic/extrinsic in camera_projection.py '
-            f'were derived assuming CANVAS_SIZE; projection_matrix will be wrong until updated.')
+            f'camera_projection{"_real" if self.is_real else ""}.CANVAS_SIZE={CANVAS_SIZE} does '
+            f'not match actual agent image shape {actual_shape} - the hardcoded camera '
+            f'intrinsic/extrinsic were derived assuming CANVAS_SIZE; projection_matrix will be '
+            f'wrong until updated.')
 
     def __len__(self):
         return len(self.pairs)
@@ -133,7 +140,7 @@ class MTLFDAgentTeacherDataset(Dataset):
             force_flip = [(-1 if random.random() > 0.5 else 1),
                           (-1 if random.random() > 0.5 else 1)]
 
-        agent_traj, _ = load_traj(self.agent_files[a_i])
+        agent_traj, _ = load_traj(self.agent_files[a_i], is_real=self.is_real)
         demo_traj, _ = load_traj(self.demo_files[d_i])
 
         context = self._make_context(demo_traj, force_flip=force_flip)
@@ -194,7 +201,8 @@ class MTLFDAgentTeacherDataset(Dataset):
         images, stats = randomize_video(images, self.color_jitter, None, self.rand_crop, 0,
                                          self.rand_translate, True, rand_flip=self.rand_flip,
                                          force_flip=force_flip)
-        projection_matrix = build_sample_projection(self.crop, stats, (self.height, self.width))
+        proj_fn = build_sample_projection_real if self.is_real else build_sample_projection
+        projection_matrix = proj_fn(self.crop, stats, (self.height, self.width))
 
         images = np.transpose(images, (0, 3, 1, 2)).astype(np.float32)
 
@@ -213,7 +221,13 @@ class MTLFDAgentTeacherDataset(Dataset):
         grasp_frames = [elements[i + 1]['action'][-1] > 0.01 for i in range(n - 1)] + [False]
 
         out_inds = np.linspace(0, n - 1, num=50, endpoint=True, dtype=int)
-        poses = np.stack([elements[i]['obs']['ee_aa'][:3] for i in out_inds]).astype(np.float32)
+        # real obs['ee_aa'] is 3-dim axis-angle ONLY (no position), unlike sim's 6-dim
+        # [pos(3), axis_angle(3)] - real position lives in its own obs['eef_pos'] field instead.
+        pos_key = 'eef_pos' if self.is_real else 'ee_aa'
+        poses = np.stack([
+            elements[i]['obs'][pos_key] if self.is_real else elements[i]['obs'][pos_key][:3]
+            for i in out_inds
+        ]).astype(np.float32)
         grasps = np.stack([grasp_frames[i] for i in out_inds]).astype(np.int32)
         traj_points = np.concatenate((poses, grasps[:, None] * 0.2), axis=-1).astype(np.float32)
 

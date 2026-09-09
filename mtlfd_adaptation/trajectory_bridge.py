@@ -21,16 +21,24 @@ if _TRAINING_ROOT not in sys.path:
 
 class AliasedTrajectory:
     """Wraps a multi_task_il Trajectory so `.get(t)['obs']['image']` is available (aliased from
-    `camera_front_image`), matching what osvi-awda's dataset code expects."""
+    `camera_front_image`), matching what osvi-awda's dataset code expects.
 
-    def __init__(self, traj):
+    `flip_bgr`: real dataset frames are JPEG-compressed and decoded with `cv2.imdecode`, which
+    always returns BGR-ordered arrays - verified empirically (mtlfd_adaptation session notes):
+    treating a real frame as RGB with no conversion renders the tan wood table as blue/cyan. Sim
+    frames are stored as raw arrays already in true RGB (no JPEG round-trip), so they must NOT be
+    flipped - only pass flip_bgr=True for the real dataset."""
+
+    def __init__(self, traj, flip_bgr=False):
         self._traj = traj
+        self._flip_bgr = flip_bgr
 
     def get(self, t, decompress=True):
         step = self._traj.get(t, decompress=decompress)
         obs = step['obs']
         if 'image' not in obs and 'camera_front_image' in obs:
-            obs['image'] = obs['camera_front_image']
+            obs['image'] = obs['camera_front_image'][..., ::-1] if self._flip_bgr \
+                else obs['camera_front_image']
         return step
 
     def __getitem__(self, t):
@@ -52,15 +60,19 @@ class AliasedTrajectory:
         return self._traj.get_raw_state(t)
 
 
-def load_traj(fname):
+def load_traj(fname, is_real=False):
     """Returns (traj, command) with traj.get(t)['obs']['image'] available, and traj.setting_name /
     traj.fname set, mirroring hem.datasets.load_traj's contract (used by osvi-awda's model code for
-    e.g. logging / camera-projection lookups)."""
+    e.g. logging / camera-projection lookups).
+
+    is_real: pass True for real_eye_in_hand_ur5e_pick_place (or any other real-camera dataset) so
+    the aliased 'image' is corrected from the camera's native BGR to RGB - see
+    AliasedTrajectory's docstring."""
     with open(fname, 'rb') as f:
         sample = pkl.load(f)
     raw_traj = sample['traj']
     command = sample.get('command', None)
-    traj = AliasedTrajectory(raw_traj)
+    traj = AliasedTrajectory(raw_traj, flip_bgr=is_real)
     # .../pick_place/{agent_or_demo_name}_pick_place/task_NN/trajXXX.pkl -> setting = task_NN
     traj.setting_name = fname.split(os.sep)[-2]
     traj.fname = fname
